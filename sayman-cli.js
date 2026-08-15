@@ -57,7 +57,9 @@ if (!fs.existsSync(CONFIG_PATH)) {
 function loadConfig() {
   if (!fs.existsSync(CLI_CONFIG_PATH)) {
     return {
-      api: 'https://sayman.onrender.com/api'
+      // No default node — SAYMAN has no central server.
+      // Run `sayman config set-api <node-url>` to configure your node.
+      api: process.env.SAYMAN_API || ''
     };
   }
 
@@ -73,7 +75,22 @@ const cliConfig = loadConfig();
 let API_BASE =
   process.env.SAYMAN_API ||
   cliConfig.api ||
-  'https://sayman.onrender.com/api';
+  '';
+
+const FALLBACK_APIS = [
+  API_BASE,
+  ...(cliConfig.fallbackApis || [])
+].filter((v, i, a) => v && a.indexOf(v) === i);
+
+function requireNodeConfigured() {
+  if (!API_BASE) {
+    console.log(chalk.red('\n❌ No SAYMAN node configured.'));
+    console.log(chalk.yellow('\nSAYMAN is a decentralised network with no central server.'));
+    console.log(chalk.yellow('Connect to any community-run SAYMAN node:\n'));
+    console.log(chalk.cyan('  sayman config set-api https://your-node.example.com/api\n'));
+    process.exit(1);
+  }
+}
 
 function loadWallet() {
   if (!fs.existsSync(WALLET_PATH)) {
@@ -95,32 +112,33 @@ function saveWallet(wallet) {
 
 async function apiCall(endpoint, options = {}) {
   const spinner = ora('Processing...').start();
+  let lastError = null;
 
-  try {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
+  for (const baseUrl of FALLBACK_APIS) {
+    try {
+      const response = await fetch(`${baseUrl}${endpoint}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers
+        }
+      });
+
+      const data = await response.json();
+      spinner.stop();
+
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`);
       }
-    });
 
-    const data = await response.json();
-
-    spinner.stop();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'API request failed');
+      return data;
+    } catch (error) {
+      lastError = error;
     }
-
-    return data;
-  } catch (error) {
-    spinner.stop();
-
-    console.log(chalk.red(`\n❌ Error: ${error.message}\n`));
-
-    process.exit(1);
   }
+
+  spinner.stop();
+  throw new Error(`API call failed across all nodes (${FALLBACK_APIS.join(', ')}): ${lastError?.message}`);
 }
 
 async function buildSignedTransaction(walletData, txData) {
